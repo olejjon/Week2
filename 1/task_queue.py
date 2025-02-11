@@ -4,8 +4,8 @@ import threading
 import time
 
 DB_CONFIG = {
-    "dbname": "db",
-    "user": "ol",
+    "dbname": "my_new_db",
+    "user": "postgres",
     "password": "123",
     "host": "localhost",
     "port": 5432,
