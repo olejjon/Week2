@@ -2,6 +2,11 @@ import psycopg2
 from psycopg2.extras import DictCursor
 import threading
 import time
+import logging
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 DB_CONFIG = {
     "dbname": "my_new_db",
@@ -13,77 +18,72 @@ DB_CONFIG = {
 
 
 def create_tasks_table():
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id SERIAL PRIMARY KEY,
-            task_name VARCHAR(255) NOT NULL,
-            status VARCHAR(50) NOT NULL DEFAULT 'pending',
-            worker_id INT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    with psycopg2.connect(**DB_CONFIG) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id SERIAL PRIMARY KEY,
+                    task_name VARCHAR(255) NOT NULL,
+                    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                    worker_id INT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_status ON tasks(status);
+            """)
+            conn.commit()
+            logging.info("Tasks table created or already exists.")
 
 
 def add_task(task_name):
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO tasks (task_name) VALUES (%s);
-    """,
-        (task_name,),
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"Task '{task_name}' added to the queue.")
+    with psycopg2.connect(**DB_CONFIG) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO tasks (task_name) VALUES (%s);
+            """,
+                (task_name,),
+            )
+            conn.commit()
+            logging.info(f"Task '{task_name}' added to the queue.")
 
 
 def fetch_task(worker_id):
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor(cursor_factory=DictCursor)
+    with psycopg2.connect(**DB_CONFIG) as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            try:
+                conn.autocommit = False
 
-    try:
-        conn.autocommit = False
+                cur.execute("""
+                    SELECT * FROM tasks
+                    WHERE status = 'pending'
+                    ORDER BY created_at
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                """)
 
-        cur.execute("""
-            SELECT * FROM tasks
-            WHERE status = 'pending'
-            ORDER BY created_at
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-        """)
+                task = cur.fetchone()
 
-        task = cur.fetchone()
+                if task:
+                    cur.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'processing', worker_id = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """,
+                        (worker_id, task["id"]),
+                    )
 
-        if task:
-            cur.execute(
-                """
-                UPDATE tasks
-                SET status = 'processing', worker_id = %s, updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """,
-                (worker_id, task["id"]),
-            )
+                    conn.commit()
+                    return task
+                else:
+                    conn.commit()
+                    return None
 
-            conn.commit()
-            return task
-        else:
-            conn.commit()
-            return None
-
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        cur.close()
-        conn.close()
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Error fetching task: {e}")
+                raise e
 
 
 def execute_task(worker_id):
@@ -91,45 +91,46 @@ def execute_task(worker_id):
 
     if task:
         try:
-            print(
+            logging.info(
                 f"Worker {worker_id} is processing task {task['id']}: {task['task_name']}"
             )
 
+            # Имитация обработки задачи
             time.sleep(2)
 
-            conn = psycopg2.connect(**DB_CONFIG)
-            cur = conn.cursor()
+            with psycopg2.connect(**DB_CONFIG) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'completed', updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """,
+                        (task["id"],),
+                    )
 
-            cur.execute(
-                """
-                UPDATE tasks
-                SET status = 'completed', updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """,
-                (task["id"],),
-            )
-
-            conn.commit()
-            print(f"Worker {worker_id} completed task {task['id']}")
+                    conn.commit()
+                    logging.info(f"Worker {worker_id} completed task {task['id']}")
 
         except Exception as e:
-            cur.execute(
-                """
-                UPDATE tasks
-                SET status = 'failed', updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """,
-                (task["id"],),
-            )
+            with psycopg2.connect(**DB_CONFIG) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """,
+                        (task["id"],),
+                    )
 
-            conn.commit()
-            print(f"Worker {worker_id} failed to process task {task['id']}: {e}")
+                    conn.commit()
+                    logging.error(
+                        f"Worker {worker_id} failed to process task {task['id']}: {e}"
+                    )
 
-        finally:
-            cur.close()
-            conn.close()
     else:
-        print(f"No tasks available for worker {worker_id}")
+        logging.info(f"No tasks available for worker {worker_id}")
 
 
 def worker(worker_id):
@@ -141,12 +142,11 @@ def worker(worker_id):
 if __name__ == "__main__":
     create_tasks_table()
 
-    add_task("Task 1")
-    add_task("Task 2")
-    add_task("Task 3")
-    add_task("Task 4")
-    add_task("Task 5")
+    # Добавление тестовых задач
+    for i in range(1, 6):
+        add_task(f"Task {i}")
 
+    # Запуск воркеров
     workers = []
     for i in range(3):  # 3 воркера
         t = threading.Thread(target=worker, args=(i + 1,))

@@ -11,8 +11,11 @@ class RedisQueue:
         serialized_msg = json.dumps(msg)
         self.r.lpush(self.queue_name, serialized_msg)
 
-    def consume(self) -> dict:
-        _, serialized_msg = self.r.brpop(self.queue_name)
+    def consume(self, timeout=0) -> dict:
+        result = self.r.brpop(self.queue_name, timeout=timeout)
+        if result is None:
+            return None  # Очередь пуста
+        _, serialized_msg = result
         return json.loads(serialized_msg)
 
 

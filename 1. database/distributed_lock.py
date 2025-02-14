@@ -1,6 +1,7 @@
 import redis
 from functools import wraps
 from datetime import timedelta
+import uuid
 
 
 class SingleDecoratorException(Exception):
@@ -14,9 +15,10 @@ def single(max_processing_time: timedelta = None):
             r = redis.Redis(host="localhost", port=6379, db=0)
 
             lock_key = f"lock_{func.__name__}"
+            lock_value = str(uuid.uuid4())
 
             acquired_lock = r.set(
-                lock_key, "locked", nx=True, ex=max_processing_time.total_seconds()
+                lock_key, lock_value, nx=True, ex=max_processing_time.total_seconds()
             )
 
             if not acquired_lock:
@@ -27,7 +29,8 @@ def single(max_processing_time: timedelta = None):
             try:
                 return func(*args, **kwargs)
             finally:
-                r.delete(lock_key)
+                if r.get(lock_key) == lock_value:
+                    r.delete(lock_key)
 
         return wrapper
 
